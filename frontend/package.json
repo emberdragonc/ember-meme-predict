@@ -1,0 +1,30 @@
+{
+  "name": "smart-contract-frontend",
+  "version": "1.0.0",
+  "private": true,
+  "scripts": {
+    "dev": "next dev",
+    "build": "next build",
+    "start": "next start",
+    "lint": "next lint"
+  },
+  "dependencies": {
+    "next": "14.2.0",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
+    "wagmi": "2.10.0",
+    "viem": "2.15.0",
+    "@tanstack/react-query": "5.40.0",
+    "@rainbow-me/rainbowkit": "2.1.2",
+    "@vercel/analytics": "1.3.1",
+    "@vercel/speed-insights": "1.0.12"
+  },
+  "devDependencies": {
+    "@types/node": "20.14.0",
+    "@types/react": "18.3.3",
+    "typescript": "5.4.5",
+    "tailwindcss": "3.4.4",
+    "postcss": "8.4.38",
+    "autoprefixer": "10.4.19"
+  }
+}

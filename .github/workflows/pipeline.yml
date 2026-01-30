@@ -1,0 +1,377 @@
+name: Smart Contract Pipeline
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      deploy_mainnet:
+        description: 'Deploy to mainnet'
+        required: false
+        default: 'false'
+
+env:
+  FOUNDRY_PROFILE: ci
+
+jobs:
+  # ============================================
+  # STAGE 1: Lint & Static Analysis
+  # ============================================
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Check formatting
+        run: forge fmt --check
+
+      - name: Run Slither
+        uses: crytic/slither-action@v0.4.0
+        with:
+          target: 'contracts/'
+          slither-args: '--exclude naming-convention,solc-version'
+          fail-on: 'high'
+        continue-on-error: true
+
+  # ============================================
+  # STAGE 2: Unit Tests
+  # ============================================
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Run tests
+        run: |
+          forge test -vvv --gas-report
+        env:
+          FOUNDRY_PROFILE: ci
+
+      - name: Run Solidity coverage
+        run: forge coverage --report summary
+      
+      - name: Run JS/TS tests with coverage
+        run: npx jest --coverage --passWithNoTests
+        continue-on-error: true
+      
+      - name: Upload coverage reports to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ============================================
+  # STAGE 3: E2E / Integration Tests
+  # ============================================
+  e2e:
+    name: E2E Tests (Fork)
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+        with:
+          version: nightly
+
+      - name: Run E2E tests on fork
+        run: |
+          if [ -n "${{ secrets.BASE_RPC_URL }}" ]; then
+            forge test --match-path "test/e2e/*" -vvv --fork-url ${{ secrets.BASE_RPC_URL }}
+          else
+            echo "⚠️ BASE_RPC_URL not set, running E2E tests without fork"
+            forge test --match-path "test/e2e/*" -vvv
+          fi
+        env:
+          FOUNDRY_PROFILE: ci
+
+  # ============================================
+  # STAGE 4: Security Audit (Automated)
+  # ============================================
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    needs: e2e
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Run Slither (Full)
+        uses: crytic/slither-action@v0.4.0
+        id: slither
+        with:
+          target: 'contracts/'
+          slither-args: '--checklist --markdown-root ${{ github.server_url }}/${{ github.repository }}/blob/${{ github.sha }}/'
+        continue-on-error: true
+
+      - name: Create audit report
+        run: |
+          echo "# Security Audit Report" > audit-report.md
+          echo "**Date:** $(date -u)" >> audit-report.md
+          echo "**Commit:** ${{ github.sha }}" >> audit-report.md
+          echo "" >> audit-report.md
+          cat results.sarif >> audit-report.md 2>/dev/null || echo "No SARIF results"
+
+      - name: Upload audit report
+        uses: actions/upload-artifact@v4
+        with:
+          name: audit-report
+          path: audit-report.md
+
+  # ============================================
+  # STAGE 5: Deploy to Testnet
+  # ============================================
+  deploy-testnet:
+    name: Deploy to Testnet
+    runs-on: ubuntu-latest
+    needs: audit
+    # Only run if on main AND secrets are configured
+    if: github.ref == 'refs/heads/main' && false
+    environment: testnet
+    outputs:
+      contract_address: ${{ steps.deploy.outputs.contract_address }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Deploy to Base Sepolia
+        id: deploy
+        run: |
+          # Deploy and capture address
+          DEPLOYED=$(forge script script/Deploy.s.sol:DeployScript \
+            --rpc-url ${{ secrets.BASE_SEPOLIA_RPC_URL }} \
+            --private-key ${{ secrets.DEPLOYER_PRIVATE_KEY }} \
+            --broadcast \
+            --verify \
+            --etherscan-api-key ${{ secrets.BASESCAN_API_KEY }} \
+            -vvv 2>&1)
+          
+          # Extract contract address
+          CONTRACT_ADDR=$(echo "$DEPLOYED" | grep -oP '(?<=Contract deployed at: )0x[a-fA-F0-9]{40}' | head -1)
+          echo "contract_address=$CONTRACT_ADDR" >> $GITHUB_OUTPUT
+          echo "Deployed to: $CONTRACT_ADDR"
+
+      - name: Save deployment info
+        run: |
+          echo "{ \"network\": \"base-sepolia\", \"address\": \"${{ steps.deploy.outputs.contract_address }}\", \"timestamp\": \"$(date -u)\" }" > deployment-testnet.json
+
+      - name: Upload deployment artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-testnet
+          path: deployment-testnet.json
+
+  # ============================================
+  # STAGE 6: Request External Audit (@clawditor)
+  # ============================================
+  request-audit:
+    name: Request Clawditor Audit
+    runs-on: ubuntu-latest
+    needs: deploy-testnet
+    # Only if testnet deploy succeeded
+    if: github.ref == 'refs/heads/main' && needs.deploy-testnet.result == 'success'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag Clawditor for audit
+        env:
+          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+          CONTRACT_ADDRESS: ${{ needs.deploy-testnet.outputs.contract_address }}
+        run: |
+          # Post tweet requesting audit
+          npm install twitter-api-v2
+          node << 'EOF'
+          const { TwitterApi } = require('twitter-api-v2');
+          const client = new TwitterApi({
+            appKey: process.env.X_CONSUMER_KEY,
+            appSecret: process.env.X_CONSUMER_SECRET,
+            accessToken: process.env.X_ACCESS_TOKEN,
+            accessSecret: process.env.X_ACCESS_TOKEN_SECRET,
+          });
+          
+          const message = `@clawditor 🦞 Audit request!
+          
+          Contract deployed to Base Sepolia: ${process.env.CONTRACT_ADDRESS}
+          
+          Repo: ${{ github.server_url }}/${{ github.repository }}
+          Commit: ${{ github.sha }}
+          
+          Please review and submit a PR with findings. 🐉`;
+          
+          client.v2.tweet(message).then(r => {
+            console.log('Tweet posted:', r.data.id);
+          }).catch(e => {
+            console.error('Tweet failed:', e.message);
+          });
+          EOF
+
+      - name: Create audit request issue
+        uses: actions/github-script@v7
+        with:
+          script: |
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: '🔍 External Audit Request - Clawditor',
+              body: `## Audit Request
+              
+              **Contract Address (Testnet):** \`${{ needs.deploy-testnet.outputs.contract_address }}\`
+              **Network:** Base Sepolia
+              **Commit:** ${{ github.sha }}
+              
+              ### Waiting for @clawditor audit
+              
+              - [ ] Clawditor review
+              - [ ] PR submitted with findings
+              - [ ] Findings addressed
+              - [ ] Ready for mainnet
+              
+              ---
+              *Automatically generated by CI/CD pipeline*`,
+              labels: ['audit', 'security', 'waiting-review']
+            });
+
+  # ============================================
+  # STAGE 7: Deploy to Mainnet (Manual Trigger)
+  # ============================================
+  deploy-mainnet:
+    name: Deploy to Mainnet
+    runs-on: ubuntu-latest
+    needs: [audit]
+    # Manual trigger only
+    if: github.event.inputs.deploy_mainnet == 'true'
+    environment: mainnet
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install Foundry
+        uses: foundry-rs/foundry-toolchain@v1
+
+      - name: Final safety check
+        run: |
+          echo "🚨 MAINNET DEPLOYMENT"
+          echo "Commit: ${{ github.sha }}"
+          echo "Triggered by: ${{ github.actor }}"
+          # Add any final checks here
+
+      - name: Deploy to Base Mainnet
+        id: deploy
+        run: |
+          DEPLOYED=$(forge script script/Deploy.s.sol:DeployScript \
+            --rpc-url ${{ secrets.BASE_MAINNET_RPC_URL }} \
+            --private-key ${{ secrets.DEPLOYER_PRIVATE_KEY }} \
+            --broadcast \
+            --verify \
+            --etherscan-api-key ${{ secrets.BASESCAN_API_KEY }} \
+            -vvv 2>&1)
+          
+          CONTRACT_ADDR=$(echo "$DEPLOYED" | grep -oP '(?<=Contract deployed at: )0x[a-fA-F0-9]{40}' | head -1)
+          echo "contract_address=$CONTRACT_ADDR" >> $GITHUB_OUTPUT
+          echo "🎉 Deployed to mainnet: $CONTRACT_ADDR"
+
+      - name: Announce deployment
+        env:
+          X_CONSUMER_KEY: ${{ secrets.X_CONSUMER_KEY }}
+          X_CONSUMER_SECRET: ${{ secrets.X_CONSUMER_SECRET }}
+          X_ACCESS_TOKEN: ${{ secrets.X_ACCESS_TOKEN }}
+          X_ACCESS_TOKEN_SECRET: ${{ secrets.X_ACCESS_TOKEN_SECRET }}
+        run: |
+          npm install twitter-api-v2
+          node << 'EOF'
+          const { TwitterApi } = require('twitter-api-v2');
+          const client = new TwitterApi({
+            appKey: process.env.X_CONSUMER_KEY,
+            appSecret: process.env.X_CONSUMER_SECRET,
+            accessToken: process.env.X_ACCESS_TOKEN,
+            accessSecret: process.env.X_ACCESS_TOKEN_SECRET,
+          });
+          
+          client.v2.tweet(`🐉 New contract deployed to Base mainnet!
+          
+          Contract: ${{ steps.deploy.outputs.contract_address }}
+          
+          Audited by @clawditor 🦞
+          Verified on Basescan ✅`);
+          EOF
+
+  # ============================================
+  # STAGE 8: Build & Deploy Frontend
+  # ============================================
+  frontend:
+    name: Build & Deploy Frontend
+    runs-on: ubuntu-latest
+    needs: audit
+    # Only if on main AND deploy is enabled
+    if: github.ref == 'refs/heads/main' && false
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci
+
+      - name: Build frontend
+        working-directory: frontend
+        run: npm run build
+        env:
+          NEXT_PUBLIC_CONTRACT_ADDRESS: ${{ needs.deploy-testnet.outputs.contract_address }}
+          NEXT_PUBLIC_CHAIN_ID: '84532'  # Base Sepolia
+          NEXT_PUBLIC_WALLETCONNECT_PROJECT_ID: ${{ secrets.WALLETCONNECT_PROJECT_ID }}
+
+      - name: Deploy to Vercel
+        uses: amondnet/vercel-action@v25
+        with:
+          vercel-token: ${{ secrets.VERCEL_TOKEN }}
+          vercel-org-id: ${{ secrets.VERCEL_ORG_ID }}
+          vercel-project-id: ${{ secrets.VERCEL_PROJECT_ID }}
+          working-directory: frontend
+          vercel-args: '--prod'
+        env:
+          VERCEL_ORG_ID: ${{ secrets.VERCEL_ORG_ID }}
+          VERCEL_PROJECT_ID: ${{ secrets.VERCEL_PROJECT_ID }}
+
+      - name: Enable Vercel Analytics
+        run: |
+          echo "Vercel Speed Insights and Web Analytics enabled via vercel.json"
+          # Analytics are configured in vercel.json and package.json

@@ -1,0 +1,30 @@
+{
+  "name": "smart-contract-framework",
+  "version": "1.0.0",
+  "description": "A production-ready smart contract development framework with automated CI/CD, E2E testing, security audits, and frontend deployment.",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs",
+    "lib": "lib",
+    "test": "test"
+  },
+  "scripts": {
+    "test": "jest",
+    "test:coverage": "jest --coverage"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/emberdragonc/smart-contract-framework.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/emberdragonc/smart-contract-framework/issues"
+  },
+  "homepage": "https://github.com/emberdragonc/smart-contract-framework#readme",
+  "devDependencies": {
+    "jest": "^30.2.0"
+  }
+}

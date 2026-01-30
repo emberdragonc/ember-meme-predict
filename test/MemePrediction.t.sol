@@ -166,6 +166,14 @@ contract MemePredictionTest is Test {
         prediction.placeWager{ value: 0 }(1, 0);
     }
 
+    function test_PlaceWager_RevertBelowMinimum() public {
+        _createBasicRound();
+
+        vm.prank(user1);
+        vm.expectRevert(MemePrediction.InsufficientWager.selector);
+        prediction.placeWager{ value: 0.0001 ether }(1, 0); // Below MIN_WAGER
+    }
+
     // ============================================
     // Resolve Round Tests
     // ============================================
@@ -510,6 +518,46 @@ contract MemePredictionTest is Test {
 
         vm.expectRevert(MemePrediction.RoundAlreadyResolved.selector);
         prediction.cancelRound(1);
+    }
+
+    function test_CommitWinner_RevertCancelled() public {
+        _createBasicRound();
+        prediction.cancelRound(1);
+
+        bytes32 commitment = prediction.computeCommitment(1, 0, SALT);
+        vm.expectRevert(MemePrediction.RoundIsCancelled.selector);
+        prediction.commitWinner(1, commitment);
+    }
+
+    function test_ResolveRound_RevertCancelled() public {
+        _createBasicRound();
+        _commitWinner(0);
+        _placeWagers();
+
+        prediction.cancelRound(1);
+
+        vm.warp(block.timestamp + 2 hours);
+
+        vm.expectRevert(MemePrediction.RoundIsCancelled.selector);
+        prediction.resolveRound(1, 0, SALT);
+    }
+
+    function test_IsBettingOpen_FalseWhenCancelled() public {
+        _createBasicRound();
+        assertTrue(prediction.isBettingOpen(1));
+
+        prediction.cancelRound(1);
+        assertFalse(prediction.isBettingOpen(1));
+    }
+
+    function test_IsRefundAvailable_TrueWhenCancelled() public {
+        _createBasicRound();
+        _placeWagers();
+
+        assertFalse(prediction.isRefundAvailable(1));
+
+        prediction.cancelRound(1);
+        assertTrue(prediction.isRefundAvailable(1)); // Immediate refund when cancelled
     }
 
     // ============================================

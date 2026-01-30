@@ -29,6 +29,7 @@ contract MemePrediction is Ownable {
     uint256 public constant MIN_DURATION = 1 hours;
     uint256 public constant REFUND_TIMEOUT = 7 days;
     uint256 public constant MAX_COINS = 20;
+    uint256 public constant MIN_WAGER = 0.001 ether;
 
     // ============================================
     // Errors
@@ -146,6 +147,7 @@ contract MemePrediction is Ownable {
         
         // CHECKS
         if (!r.exists) revert RoundNotActive();
+        if (r.cancelled) revert RoundIsCancelled();
         if (r.commitment != bytes32(0)) revert AlreadyCommitted();
         if (block.timestamp >= r.deadline) revert BettingClosed();
         
@@ -164,6 +166,7 @@ contract MemePrediction is Ownable {
         
         // CHECKS
         if (!r.exists) revert RoundNotActive();
+        if (r.cancelled) revert RoundIsCancelled();
         if (r.resolved) revert RoundAlreadyResolved();
         if (block.timestamp < r.deadline) revert BettingStillOpen();
         if (_winningCoinIndex >= r.coins.length) revert InvalidCoinIndex();
@@ -233,7 +236,7 @@ contract MemePrediction is Ownable {
         if (r.cancelled) revert RoundIsCancelled();
         if (block.timestamp >= r.deadline) revert BettingClosed();
         if (_coinIndex >= r.coins.length) revert InvalidCoinIndex();
-        if (msg.value == 0) revert InsufficientWager();
+        if (msg.value < MIN_WAGER) revert InsufficientWager();
 
         Wager storage w = wagers[_roundId][msg.sender];
         
@@ -345,13 +348,13 @@ contract MemePrediction is Ownable {
     /// @notice Check if betting is still open
     function isBettingOpen(uint256 _roundId) external view returns (bool) {
         Round storage r = rounds[_roundId];
-        return r.exists && !r.resolved && block.timestamp < r.deadline;
+        return r.exists && !r.resolved && !r.cancelled && block.timestamp < r.deadline;
     }
 
     /// @notice Check if emergency refund is available for a round
     function isRefundAvailable(uint256 _roundId) external view returns (bool) {
         Round storage r = rounds[_roundId];
-        return r.exists && !r.resolved && block.timestamp >= r.deadline + REFUND_TIMEOUT;
+        return r.exists && !r.resolved && (r.cancelled || block.timestamp >= r.deadline + REFUND_TIMEOUT);
     }
 
     /// @notice Helper to compute commitment hash (use off-chain, save the salt!)

@@ -265,6 +265,7 @@ contract MemePrediction is Ownable {
         // CHECKS
         if (!r.resolved) revert RoundNotResolved();
         if (w.claimed) revert AlreadyClaimed();
+        if (w.refunded) revert AlreadyRefunded(); // Prevent double withdrawal
         if (w.coinIndex != r.winningCoinIndex) revert NoWinnings();
         if (w.amount == 0) revert NoWinnings();
 

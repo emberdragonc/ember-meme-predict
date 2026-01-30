@@ -318,6 +318,29 @@ contract MemePredictionTest is Test {
         vm.stopPrank();
     }
 
+    function test_ClaimWinnings_RevertAfterRefund_DoubleWithdrawal() public {
+        // CRITICAL: Test for double withdrawal attack
+        // User should NOT be able to refund AND then claim
+        _createBasicRound();
+        _commitWinner(0);
+        _placeWagers();
+
+        // Wait past refund timeout
+        vm.warp(block.timestamp + 1 hours + 7 days + 1);
+
+        // User1 refunds first
+        vm.prank(user1);
+        prediction.emergencyRefund(1);
+
+        // Admin then resolves (user1 bet on winner coin 0)
+        prediction.resolveRound(1, 0, SALT);
+
+        // User1 tries to claim winnings AFTER refunding - should fail!
+        vm.prank(user1);
+        vm.expectRevert(MemePrediction.AlreadyRefunded.selector);
+        prediction.claimWinnings(1);
+    }
+
     // ============================================
     // Emergency Refund Tests
     // ============================================

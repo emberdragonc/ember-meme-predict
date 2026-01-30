@@ -11,9 +11,11 @@ import { Ownable } from "@openzeppelin/contracts/access/Ownable.sol";
  *
  * How it works:
  * 1. Admin creates a round with N memecoins (by symbol)
- * 2. Users place wagers on their pick during betting window
- * 3. After deadline, admin resolves with the winning coin
- * 4. Winners split the pot proportionally, minus platform fee
+ * 2. Admin commits to winner hash BEFORE betting closes (commit-reveal)
+ * 3. Users place wagers on their pick during betting window
+ * 4. After deadline, admin reveals the winning coin (must match commitment)
+ * 5. Winners split the pot proportionally, minus platform fee
+ * 6. If admin fails to resolve within timeout, users can claim refunds
  *
  * Fee: 5% (50% to idea contributor, 50% to EMBER stakers via FeeSplitter)
  */
@@ -24,6 +26,8 @@ contract MemePrediction is Ownable {
     
     uint256 public constant FEE_BPS = 500; // 5% fee
     uint256 public constant BPS = 10_000;
+    uint256 public constant MIN_DURATION = 1 hours;
+    uint256 public constant REFUND_TIMEOUT = 7 days;
 
     // ============================================
     // Errors
@@ -38,6 +42,15 @@ contract MemePrediction is Ownable {
     error AlreadyClaimed();
     error NoWinnings();
     error TransferFailed();
+    error ZeroAddress();
+    error DurationTooShort();
+    error NeedAtLeastTwoCoins();
+    error RefundTooEarly();
+    error AlreadyRefunded();
+    error NoCommitment();
+    error CommitmentMismatch();
+    error AlreadyCommitted();
+    error BettingStillOpen();
 
     // ============================================
     // Events
@@ -45,8 +58,10 @@ contract MemePrediction is Ownable {
     
     event RoundCreated(uint256 indexed roundId, string[] coins, uint256 deadline);
     event WagerPlaced(uint256 indexed roundId, address indexed user, uint256 coinIndex, uint256 amount);
+    event WinnerCommitted(uint256 indexed roundId, bytes32 commitmentHash);
     event RoundResolved(uint256 indexed roundId, uint256 winningCoinIndex, string winningCoin);
     event WinningsClaimed(uint256 indexed roundId, address indexed user, uint256 amount);
+    event EmergencyRefund(uint256 indexed roundId, address indexed user, uint256 amount);
     event FeesCollected(uint256 amount);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
 
@@ -59,6 +74,7 @@ contract MemePrediction is Ownable {
         uint256 deadline;         // Betting closes at this timestamp
         uint256 totalPot;         // Total ETH wagered
         uint256 winningCoinIndex; // Index of winning coin (set on resolve)
+        bytes32 commitment;       // Hash commitment of winner (for commit-reveal)
         bool resolved;            // Has the round been resolved?
         bool exists;              // Does this round exist?
     }
@@ -67,6 +83,7 @@ contract MemePrediction is Ownable {
         uint256 coinIndex;  // Which coin they bet on
         uint256 amount;     // How much they wagered
         bool claimed;       // Have they claimed winnings?
+        bool refunded;      // Have they claimed emergency refund?
     }
 
     // ============================================
@@ -98,6 +115,10 @@ contract MemePrediction is Ownable {
     /// @param _duration How long the betting window stays open (in seconds)
     /// @return roundId The ID of the created round
     function createRound(string[] memory _coins, uint256 _duration) external onlyOwner returns (uint256 roundId) {
+        // CHECKS
+        if (_duration < MIN_DURATION) revert DurationTooShort();
+        if (_coins.length < 2) revert NeedAtLeastTwoCoins();
+        
         roundId = nextRoundId++;
         
         Round storage r = rounds[roundId];
@@ -108,16 +129,41 @@ contract MemePrediction is Ownable {
         emit RoundCreated(roundId, _coins, r.deadline);
     }
 
-    /// @notice Resolve a round with the winning coin
+    /// @notice Commit to a winner before betting closes (commit-reveal scheme)
+    /// @dev Hash = keccak256(abi.encodePacked(roundId, winningCoinIndex, salt))
+    /// @param _roundId The round to commit for
+    /// @param _commitmentHash The hash of (roundId, winningCoinIndex, salt)
+    function commitWinner(uint256 _roundId, bytes32 _commitmentHash) external onlyOwner {
+        Round storage r = rounds[_roundId];
+        
+        // CHECKS
+        if (!r.exists) revert RoundNotActive();
+        if (r.commitment != bytes32(0)) revert AlreadyCommitted();
+        if (block.timestamp >= r.deadline) revert BettingClosed();
+        
+        // EFFECTS
+        r.commitment = _commitmentHash;
+        
+        emit WinnerCommitted(_roundId, _commitmentHash);
+    }
+
+    /// @notice Resolve a round by revealing the committed winner
     /// @param _roundId The round to resolve
-    /// @param _winningCoinIndex Index of the winning coin
-    function resolveRound(uint256 _roundId, uint256 _winningCoinIndex) external onlyOwner {
+    /// @param _winningCoinIndex Index of the winning coin (must match commitment)
+    /// @param _salt The salt used in the commitment hash
+    function resolveRound(uint256 _roundId, uint256 _winningCoinIndex, bytes32 _salt) external onlyOwner {
         Round storage r = rounds[_roundId];
         
         // CHECKS
         if (!r.exists) revert RoundNotActive();
         if (r.resolved) revert RoundAlreadyResolved();
+        if (block.timestamp < r.deadline) revert BettingStillOpen();
         if (_winningCoinIndex >= r.coins.length) revert InvalidCoinIndex();
+        if (r.commitment == bytes32(0)) revert NoCommitment();
+        
+        // Verify commitment matches reveal
+        bytes32 expectedHash_ = keccak256(abi.encodePacked(_roundId, _winningCoinIndex, _salt));
+        if (expectedHash_ != r.commitment) revert CommitmentMismatch();
 
         // EFFECTS
         r.winningCoinIndex = _winningCoinIndex;
@@ -139,6 +185,7 @@ contract MemePrediction is Ownable {
     /// @notice Update the fee recipient
     /// @param _feeRecipient New fee recipient address
     function setFeeRecipient(address _feeRecipient) external onlyOwner {
+        if (_feeRecipient == address(0)) revert ZeroAddress();
         address old_ = feeRecipient;
         feeRecipient = _feeRecipient;
         emit FeeRecipientUpdated(old_, _feeRecipient);
@@ -204,6 +251,31 @@ contract MemePrediction is Ownable {
         emit WinningsClaimed(_roundId, msg.sender, userShare_);
     }
 
+    /// @notice Emergency refund if admin fails to resolve within timeout
+    /// @param _roundId The round to claim refund from
+    function emergencyRefund(uint256 _roundId) external {
+        Round storage r = rounds[_roundId];
+        Wager storage w = wagers[_roundId][msg.sender];
+        
+        // CHECKS
+        if (!r.exists) revert RoundNotActive();
+        if (r.resolved) revert RoundAlreadyResolved(); // Can't refund if already resolved
+        if (block.timestamp < r.deadline + REFUND_TIMEOUT) revert RefundTooEarly();
+        if (w.refunded) revert AlreadyRefunded();
+        if (w.amount == 0) revert NoWinnings();
+        
+        uint256 refundAmount_ = w.amount;
+        
+        // EFFECTS
+        w.refunded = true;
+        
+        // INTERACTIONS
+        (bool success_,) = msg.sender.call{ value: refundAmount_ }("");
+        if (!success_) revert TransferFailed();
+        
+        emit EmergencyRefund(_roundId, msg.sender, refundAmount_);
+    }
+
     // ============================================
     // View Functions
     // ============================================
@@ -212,20 +284,27 @@ contract MemePrediction is Ownable {
     function getRound(uint256 _roundId)
         external
         view
-        returns (string[] memory coins_, uint256 deadline_, uint256 totalPot_, uint256 winningCoinIndex_, bool resolved_)
+        returns (
+            string[] memory coins_,
+            uint256 deadline_,
+            uint256 totalPot_,
+            uint256 winningCoinIndex_,
+            bytes32 commitment_,
+            bool resolved_
+        )
     {
         Round storage r = rounds[_roundId];
-        return (r.coins, r.deadline, r.totalPot, r.winningCoinIndex, r.resolved);
+        return (r.coins, r.deadline, r.totalPot, r.winningCoinIndex, r.commitment, r.resolved);
     }
 
     /// @notice Get user's wager for a round
     function getWager(uint256 _roundId, address _user)
         external
         view
-        returns (uint256 coinIndex_, uint256 amount_, bool claimed_)
+        returns (uint256 coinIndex_, uint256 amount_, bool claimed_, bool refunded_)
     {
         Wager storage w = wagers[_roundId][_user];
-        return (w.coinIndex, w.amount, w.claimed);
+        return (w.coinIndex, w.amount, w.claimed, w.refunded);
     }
 
     /// @notice Get total wagered on a specific coin in a round
@@ -237,5 +316,20 @@ contract MemePrediction is Ownable {
     function isBettingOpen(uint256 _roundId) external view returns (bool) {
         Round storage r = rounds[_roundId];
         return r.exists && !r.resolved && block.timestamp < r.deadline;
+    }
+
+    /// @notice Check if emergency refund is available for a round
+    function isRefundAvailable(uint256 _roundId) external view returns (bool) {
+        Round storage r = rounds[_roundId];
+        return r.exists && !r.resolved && block.timestamp >= r.deadline + REFUND_TIMEOUT;
+    }
+
+    /// @notice Helper to compute commitment hash (use off-chain, save the salt!)
+    function computeCommitment(uint256 _roundId, uint256 _winningCoinIndex, bytes32 _salt) 
+        external 
+        pure 
+        returns (bytes32) 
+    {
+        return keccak256(abi.encodePacked(_roundId, _winningCoinIndex, _salt));
     }
 }

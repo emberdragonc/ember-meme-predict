@@ -28,6 +28,7 @@ contract MemePrediction is Ownable {
     uint256 public constant BPS = 10_000;
     uint256 public constant MIN_DURATION = 1 hours;
     uint256 public constant REFUND_TIMEOUT = 7 days;
+    uint256 public constant MAX_COINS = 20;
 
     // ============================================
     // Errors
@@ -51,6 +52,9 @@ contract MemePrediction is Ownable {
     error CommitmentMismatch();
     error AlreadyCommitted();
     error BettingStillOpen();
+    error TooManyCoins();
+    error NoWinnersExist();
+    error RoundIsCancelled();
 
     // ============================================
     // Events
@@ -64,6 +68,7 @@ contract MemePrediction is Ownable {
     event EmergencyRefund(uint256 indexed roundId, address indexed user, uint256 amount);
     event FeesCollected(uint256 amount);
     event FeeRecipientUpdated(address indexed oldRecipient, address indexed newRecipient);
+    event RoundCancelled(uint256 indexed roundId);
 
     // ============================================
     // Types
@@ -77,6 +82,7 @@ contract MemePrediction is Ownable {
         bytes32 commitment;       // Hash commitment of winner (for commit-reveal)
         bool resolved;            // Has the round been resolved?
         bool exists;              // Does this round exist?
+        bool cancelled;           // Has the round been cancelled?
     }
 
     struct Wager {
@@ -103,6 +109,7 @@ contract MemePrediction is Ownable {
     // ============================================
     
     constructor(address _feeRecipient) Ownable(msg.sender) {
+        if (_feeRecipient == address(0)) revert ZeroAddress();
         feeRecipient = _feeRecipient;
     }
 
@@ -118,6 +125,7 @@ contract MemePrediction is Ownable {
         // CHECKS
         if (_duration < MIN_DURATION) revert DurationTooShort();
         if (_coins.length < 2) revert NeedAtLeastTwoCoins();
+        if (_coins.length > MAX_COINS) revert TooManyCoins();
         
         roundId = nextRoundId++;
         
@@ -164,6 +172,9 @@ contract MemePrediction is Ownable {
         // Verify commitment matches reveal
         bytes32 expectedHash_ = keccak256(abi.encodePacked(_roundId, _winningCoinIndex, _salt));
         if (expectedHash_ != r.commitment) revert CommitmentMismatch();
+        
+        // Ensure at least one person bet on the winning coin
+        if (coinTotals[_roundId][_winningCoinIndex] == 0) revert NoWinnersExist();
 
         // EFFECTS
         r.winningCoinIndex = _winningCoinIndex;
@@ -191,6 +202,22 @@ contract MemePrediction is Ownable {
         emit FeeRecipientUpdated(old_, _feeRecipient);
     }
 
+    /// @notice Cancel a round (users can immediately claim refunds)
+    /// @param _roundId The round to cancel
+    function cancelRound(uint256 _roundId) external onlyOwner {
+        Round storage r = rounds[_roundId];
+        
+        // CHECKS
+        if (!r.exists) revert RoundNotActive();
+        if (r.resolved) revert RoundAlreadyResolved();
+        if (r.cancelled) revert RoundIsCancelled();
+        
+        // EFFECTS
+        r.cancelled = true;
+        
+        emit RoundCancelled(_roundId);
+    }
+
     // ============================================
     // User Functions
     // ============================================
@@ -203,6 +230,7 @@ contract MemePrediction is Ownable {
         
         // CHECKS
         if (!r.exists) revert RoundNotActive();
+        if (r.cancelled) revert RoundIsCancelled();
         if (block.timestamp >= r.deadline) revert BettingClosed();
         if (_coinIndex >= r.coins.length) revert InvalidCoinIndex();
         if (msg.value == 0) revert InsufficientWager();
@@ -260,7 +288,8 @@ contract MemePrediction is Ownable {
         // CHECKS
         if (!r.exists) revert RoundNotActive();
         if (r.resolved) revert RoundAlreadyResolved(); // Can't refund if already resolved
-        if (block.timestamp < r.deadline + REFUND_TIMEOUT) revert RefundTooEarly();
+        // Allow immediate refund if cancelled, otherwise wait for timeout
+        if (!r.cancelled && block.timestamp < r.deadline + REFUND_TIMEOUT) revert RefundTooEarly();
         if (w.refunded) revert AlreadyRefunded();
         if (w.amount == 0) revert NoWinnings();
         
@@ -290,11 +319,12 @@ contract MemePrediction is Ownable {
             uint256 totalPot_,
             uint256 winningCoinIndex_,
             bytes32 commitment_,
-            bool resolved_
+            bool resolved_,
+            bool cancelled_
         )
     {
         Round storage r = rounds[_roundId];
-        return (r.coins, r.deadline, r.totalPot, r.winningCoinIndex, r.commitment, r.resolved);
+        return (r.coins, r.deadline, r.totalPot, r.winningCoinIndex, r.commitment, r.resolved, r.cancelled);
     }
 
     /// @notice Get user's wager for a round

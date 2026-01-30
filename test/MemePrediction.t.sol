@@ -36,7 +36,7 @@ contract MemePredictionTest is Test {
         uint256 roundId = prediction.createRound(coins, 1 hours);
         assertEq(roundId, 1);
 
-        (string[] memory returnedCoins, uint256 deadline, uint256 totalPot, , , bool resolved) = prediction.getRound(1);
+        (string[] memory returnedCoins, uint256 deadline, uint256 totalPot, , , bool resolved, ) = prediction.getRound(1);
         assertEq(returnedCoins.length, 3);
         assertEq(returnedCoins[0], "PEPE");
         assertEq(deadline, block.timestamp + 1 hours);
@@ -81,7 +81,7 @@ contract MemePredictionTest is Test {
         bytes32 commitment = prediction.computeCommitment(1, 0, SALT);
         prediction.commitWinner(1, commitment);
         
-        (, , , , bytes32 storedCommitment, ) = prediction.getRound(1);
+        (, , , , bytes32 storedCommitment, , ) = prediction.getRound(1);
         assertEq(storedCommitment, commitment);
     }
 
@@ -121,7 +121,7 @@ contract MemePredictionTest is Test {
         assertFalse(claimed);
         assertFalse(refunded);
 
-        (, , uint256 totalPot, , , ) = prediction.getRound(1);
+        (, , uint256 totalPot, , , , ) = prediction.getRound(1);
         assertEq(totalPot, 1 ether);
     }
 
@@ -180,7 +180,7 @@ contract MemePredictionTest is Test {
         uint256 feeRecipientBefore = feeRecipient.balance;
         prediction.resolveRound(1, 0, SALT); // PEPE wins
         
-        (, , , uint256 winningCoinIndex, , bool resolved) = prediction.getRound(1);
+        (, , , uint256 winningCoinIndex, , bool resolved, ) = prediction.getRound(1);
         assertTrue(resolved);
         assertEq(winningCoinIndex, 0);
 
@@ -419,6 +419,97 @@ contract MemePredictionTest is Test {
     function test_SetFeeRecipient_RevertZeroAddress() public {
         vm.expectRevert(MemePrediction.ZeroAddress.selector);
         prediction.setFeeRecipient(address(0));
+    }
+
+    function test_Constructor_RevertZeroAddress() public {
+        vm.expectRevert(MemePrediction.ZeroAddress.selector);
+        new MemePrediction(address(0));
+    }
+
+    function test_CreateRound_RevertTooManyCoins() public {
+        string[] memory coins = new string[](21);
+        for (uint i = 0; i < 21; i++) {
+            coins[i] = "COIN";
+        }
+
+        vm.expectRevert(MemePrediction.TooManyCoins.selector);
+        prediction.createRound(coins, 1 hours);
+    }
+
+    function test_ResolveRound_RevertNoWinnersExist() public {
+        _createBasicRound();
+        // Commit to SHIB winning (index 2)
+        bytes32 commitment = prediction.computeCommitment(1, 2, SALT);
+        prediction.commitWinner(1, commitment);
+        
+        // Only place wagers on PEPE and DOGE, not SHIB
+        vm.prank(user1);
+        prediction.placeWager{ value: 1 ether }(1, 0); // PEPE
+        vm.prank(user2);
+        prediction.placeWager{ value: 1 ether }(1, 1); // DOGE
+
+        vm.warp(block.timestamp + 2 hours);
+
+        // Try to resolve with SHIB which has 0 bets
+        vm.expectRevert(MemePrediction.NoWinnersExist.selector);
+        prediction.resolveRound(1, 2, SALT);
+    }
+
+    // ============================================
+    // Cancel Round Tests
+    // ============================================
+
+    function test_CancelRound() public {
+        _createBasicRound();
+        _placeWagers();
+
+        prediction.cancelRound(1);
+
+        (, , , , , , bool cancelled) = prediction.getRound(1);
+        assertTrue(cancelled);
+    }
+
+    function test_CancelRound_ImmediateRefund() public {
+        _createBasicRound();
+        _placeWagers();
+
+        prediction.cancelRound(1);
+
+        // User can immediately claim refund (no 7 day wait)
+        uint256 user1Before = user1.balance;
+        vm.prank(user1);
+        prediction.emergencyRefund(1);
+
+        assertEq(user1.balance - user1Before, 1 ether);
+    }
+
+    function test_CancelRound_RevertPlaceWager() public {
+        _createBasicRound();
+        prediction.cancelRound(1);
+
+        vm.prank(user1);
+        vm.expectRevert(MemePrediction.RoundIsCancelled.selector);
+        prediction.placeWager{ value: 1 ether }(1, 0);
+    }
+
+    function test_CancelRound_RevertAlreadyCancelled() public {
+        _createBasicRound();
+        prediction.cancelRound(1);
+
+        vm.expectRevert(MemePrediction.RoundIsCancelled.selector);
+        prediction.cancelRound(1);
+    }
+
+    function test_CancelRound_RevertAlreadyResolved() public {
+        _createBasicRound();
+        _commitWinner(0);
+        _placeWagers();
+
+        vm.warp(block.timestamp + 2 hours);
+        prediction.resolveRound(1, 0, SALT);
+
+        vm.expectRevert(MemePrediction.RoundAlreadyResolved.selector);
+        prediction.cancelRound(1);
     }
 
     // ============================================

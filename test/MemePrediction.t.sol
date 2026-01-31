@@ -457,6 +457,24 @@ contract MemePredictionTest is Test {
         new MemePrediction(address(0));
     }
 
+    // MEDIUM-2 FIX TESTS: Zero-address validation in admin functions
+    function test_TransferOwnership_RevertZeroAddress() public {
+        vm.expectRevert(MemePrediction.ZeroAddress.selector);
+        prediction.transferOwnership(address(0));
+    }
+
+    function test_TransferOwnership_ValidAddress() public {
+        address newOwner = makeAddr("newOwner");
+        prediction.transferOwnership(newOwner);
+        assertEq(prediction.owner(), newOwner);
+    }
+
+    function test_RenounceOwnership_Reverts() public {
+        // Renouncing ownership is disabled to prevent accidental lockout
+        vm.expectRevert(MemePrediction.ZeroAddress.selector);
+        prediction.renounceOwnership();
+    }
+
     function test_CreateRound_RevertTooManyCoins() public {
         string[] memory coins = new string[](21);
         for (uint i = 0; i < 21; i++) {
@@ -467,7 +485,8 @@ contract MemePredictionTest is Test {
         prediction.createRound(coins, 1 hours);
     }
 
-    function test_ResolveRound_RevertNoWinnersExist() public {
+    function test_ResolveRound_AutoCancelNoWinnersExist() public {
+        // MEDIUM-1 FIX: Instead of reverting, auto-cancel when winning coin has no bets
         _createBasicRound();
         // Commit to SHIB winning (index 2)
         bytes32 commitment = prediction.computeCommitment(1, 2, SALT);
@@ -481,9 +500,22 @@ contract MemePredictionTest is Test {
 
         vm.warp(block.timestamp + 2 hours);
 
-        // Try to resolve with SHIB which has 0 bets
-        vm.expectRevert(MemePrediction.NoWinnersExist.selector);
+        // Resolve with SHIB which has 0 bets - should auto-cancel instead of revert
         prediction.resolveRound(1, 2, SALT);
+        
+        // Verify round was cancelled, not resolved
+        (, , , , , bool resolved, bool cancelled) = prediction.getRound(1);
+        assertFalse(resolved, "Round should not be marked as resolved");
+        assertTrue(cancelled, "Round should be auto-cancelled");
+        
+        // Users should be able to claim refunds immediately
+        assertTrue(prediction.isRefundAvailable(1), "Refund should be available");
+        
+        // Verify users can actually get refunds
+        uint256 user1BalanceBefore = user1.balance;
+        vm.prank(user1);
+        prediction.emergencyRefund(1);
+        assertEq(user1.balance, user1BalanceBefore + 1 ether, "User should get full refund");
     }
 
     // ============================================

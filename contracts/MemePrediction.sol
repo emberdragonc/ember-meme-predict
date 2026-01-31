@@ -176,8 +176,13 @@ contract MemePrediction is Ownable {
         bytes32 expectedHash_ = keccak256(abi.encodePacked(_roundId, _winningCoinIndex, _salt));
         if (expectedHash_ != r.commitment) revert CommitmentMismatch();
         
-        // Ensure at least one person bet on the winning coin
-        if (coinTotals[_roundId][_winningCoinIndex] == 0) revert NoWinnersExist();
+        // MEDIUM-1 FIX: If winning coin has zero bets, auto-cancel round
+        // This prevents griefing where admin commits to an unpopular coin
+        if (coinTotals[_roundId][_winningCoinIndex] == 0) {
+            r.cancelled = true;
+            emit RoundCancelled(_roundId);
+            return; // Users can now claim refunds
+        }
 
         // EFFECTS
         r.winningCoinIndex = _winningCoinIndex;
@@ -203,6 +208,20 @@ contract MemePrediction is Ownable {
         address old_ = feeRecipient;
         feeRecipient = _feeRecipient;
         emit FeeRecipientUpdated(old_, _feeRecipient);
+    }
+
+    // MEDIUM-2 FIX: Override Ownable functions to prevent zero-address admin
+    
+    /// @notice Transfer ownership with zero-address validation
+    /// @param newOwner The address of the new owner
+    function transferOwnership(address newOwner) public override onlyOwner {
+        if (newOwner == address(0)) revert ZeroAddress();
+        super.transferOwnership(newOwner);
+    }
+
+    /// @notice Renounce ownership is disabled to prevent accidental lockout
+    function renounceOwnership() public pure override {
+        revert ZeroAddress(); // Renouncing would set owner to zero
     }
 
     /// @notice Cancel a round (users can immediately claim refunds)

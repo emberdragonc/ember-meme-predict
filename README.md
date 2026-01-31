@@ -8,8 +8,10 @@ Wager on which memecoin pumps hardest. Winners take the pot.
 
 | Network | Address | Status |
 |---------|---------|--------|
-| Base Sepolia | `0x8ac36e6142270717cc5f8998c9076a5c3c80a9f5` | ⏳ Awaiting Audit |
-| Base Mainnet | TBD | ❌ Not Deployed |
+| Base Sepolia | `0x8ac36e6142270717cc5f8998c9076a5c3c80a9f5` | ✅ Testnet |
+| Base Mainnet | `0xb9ba0D7CcA61CE616B5aF0772B5e5D7017259446` | ✅ **LIVE** |
+
+[View on Basescan](https://basescan.org/address/0xb9ba0D7CcA61CE616B5aF0772B5e5D7017259446)
 
 ## How It Works
 

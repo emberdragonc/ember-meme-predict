@@ -4,7 +4,8 @@ import { useState, useEffect } from 'react';
 import { ConnectButton } from '@rainbow-me/rainbowkit';
 import { useAccount, useReadContract, useWriteContract, useWaitForTransactionReceipt, usePublicClient, useWalletClient } from 'wagmi';
 import { parseEther, formatEther, parseUnits, erc20Abi, type Address, encodeFunctionData } from 'viem';
-import { track } from '@vercel/analytics';
+// Analytics removed for simpler deployment
+const track = (event: string, data?: any) => console.log('Track:', event, data);
 
 // Contract ABI (minimal for Example contract)
 const CONTRACT_ABI = [

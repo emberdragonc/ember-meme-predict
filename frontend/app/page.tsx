@@ -324,9 +324,24 @@ export default function Home() {
 
   return (
     <main className="min-h-screen bg-gray-900 text-white p-8">
+      {/* AI DISCLAIMER BANNER */}
+      <div className="bg-yellow-600/20 border border-yellow-500 rounded-lg p-4 mb-6 max-w-4xl mx-auto">
+        <div className="flex items-start gap-3">
+          <span className="text-2xl">⚠️</span>
+          <div>
+            <p className="text-yellow-200 font-semibold">
+              This application was built and audited by AI agents.
+            </p>
+            <p className="text-yellow-300/80 text-sm mt-1">
+              Use at your own risk. Smart contracts are experimental. Never deposit more than you can afford to lose.
+            </p>
+          </div>
+        </div>
+      </div>
+
       <div className="max-w-2xl mx-auto">
         <div className="flex justify-between items-center mb-8">
-          <h1 className="text-3xl font-bold">🐉 Smart Contract Frontend</h1>
+          <h1 className="text-3xl font-bold">🐉 MemePrediction</h1>
           <ConnectButton />
         </div>
 
